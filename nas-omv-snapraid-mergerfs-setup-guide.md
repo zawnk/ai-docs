@@ -10,7 +10,7 @@
 | NVMe 1TB — partition 1 (~60 GB) | OMV operating system | ext4 (installer managed) |
 | NVMe 1TB — partition 2 (~940 GB) | MergerFS write cache | Btrfs |
 | HDD Bay 1 — 18 TB Toshiba | **Data drive** (MergerFS pool + SnapRAID data) | Btrfs |
-| HDD Bay 2 — 18 TB Toshiba | **Parity drive** (SnapRAID parity only) | Btrfs |
+| HDD Bay 2 — 18 TB Toshiba | **Parity drive** (SnapRAID parity only) | ext4 |
 | Bays 3 & 4 | Empty — reserved for future expansion | — |
 
 **MergerFS pool** = NVMe cache + HDD Bay 1 (all read/write goes here)  
@@ -236,7 +236,7 @@ Look for `SMART overall-health self-assessment test result: PASSED` near the top
 
 We left the third NVMe partition unformatted during installation. Now we'll set it up as a Btrfs cache volume.
 
-### 6.1 Identify the Partition
+### 7.1 Identify the Partition
 
 SSH in and run:
 ```bash
@@ -253,13 +253,13 @@ nvme0n1
 
 Note the partition name (e.g., `nvme0n1p3`).
 
-### 6.2 Format as Btrfs
+### 7.2 Format as Btrfs
 
 ```bash
 mkfs.btrfs /dev/nvme0n1p3 -L "cache"
 ```
 
-### 6.3 Mount in OMV
+### 7.3 Mount in OMV
 
 Now tell OMV about this filesystem:  
 `Storage` → `File Systems` → Click the **+** (Mount) button
@@ -274,13 +274,13 @@ Make a note of this path — you'll need it later. You can find it in `Storage` 
 
 ---
 
-## Phase 8 — Format the Data Drives with Btrfs
+## Phase 8 — Format the Data Drives
 
-Both HDDs will be formatted with Btrfs. **Bay 1 = data drive, Bay 2 = parity drive.**
+The data drive (Bay 1) gets **Btrfs** — its checksumming is what lets SnapRAID detect bitrot at the filesystem level. The parity drive (Bay 2) gets **ext4** — SnapRAID's parity is a single large binary file that SnapRAID checksums internally; Btrfs adds no benefit there and introduces background processes that can interfere with hd-idle spindown.
 
 > ⚠️ This will erase everything on both drives. Make sure you haven't put any data on them.
 
-### 7.1 Identify the Drives
+### 8.1 Identify the Drives
 
 ```bash
 lsblk -d -o NAME,SIZE,MODEL
@@ -288,19 +288,17 @@ lsblk -d -o NAME,SIZE,MODEL
 
 Your Toshiba drives will appear as `/dev/sda` and `/dev/sdb` (or similar). Confirm with the size (18 TB).
 
-### 7.2 Format Both Drives
+### 8.2 Format the Drives
 
 ```bash
-# Bay 1 — Data drive
+# Bay 1 — Data drive: Btrfs for filesystem-level checksumming
 mkfs.btrfs /dev/sda -L "data1"
 
-# Bay 2 — Parity drive
-mkfs.btrfs /dev/sdb -L "parity1"
+# Bay 2 — Parity drive: ext4, simpler and correct for SnapRAID's single parity file
+mkfs.ext4 -L "parity1" /dev/sdb
 ```
 
-> **Note**: We use Btrfs on both drives. It gives us checksumming on the data drive (which SnapRAID can use to detect and fix bitrot) and is consistent across the array.
-
-### 7.3 Mount Both Drives in OMV
+### 8.3 Mount Both Drives in OMV
 
 `Storage` → `File Systems` → click **+** (Mount)
 
@@ -312,17 +310,17 @@ Mount **both** drives, one at a time. OMV will assign each a `/srv/dev-disk-by-u
 
 SnapRAID protects against drive failure and detects bitrot. It is **not** real-time RAID — it takes periodic snapshots. This means you must sync regularly (covered in Phase 15).
 
-### 8.1 Open SnapRAID Configuration
+### 9.1 Open SnapRAID Configuration
 
 `Storage` → `SnapRAID`
 
-### 8.2 Configure Parity Drive
+### 9.2 Configure Parity Drive
 
 In the **Parity** section, add:
 - **Parity file path**: `<parity-drive-mount-path>/snapraid.parity`  
   Replace `<parity-drive-mount-path>` with the actual mount path of Bay 2 (e.g., `/srv/dev-disk-by-uuid-XXXXXX/snapraid.parity`)
 
-### 8.3 Add Data Drive
+### 9.3 Add Data Drive
 
 In the **Drives** section, add:
 - **Content file**: Enabled
@@ -337,14 +335,14 @@ And optionally on the NVMe cache:
 
 > Having the content file in multiple locations is recommended — SnapRAID needs at least one to function after a failure.
 
-### 8.4 Configure SnapRAID Settings
+### 9.4 Configure SnapRAID Settings
 
 Still in `Storage` → `SnapRAID` → `Settings` tab:
 - **Exclude files**: add `*.unrecoverable` and `tmp/`
 - **Autosave**: `500` (saves content file every 500 GB of processed data — protects against interrupted syncs)
 - Everything else can stay at defaults for now.
 
-### 8.5 Run First Sync
+### 9.5 Run First Sync
 
 `Storage` → `SnapRAID` → click **Sync**
 
@@ -388,7 +386,7 @@ This pool contains only your HDD data drives. It is what SnapRAID's data ultimat
 
 **Pool 1 options — copy this string:**
 ```
-defaults,allow_other,use_ino,cache.files=off,dropcacheonclose=true,category.create=epmfs,minfreespace=50G,moveonenospc=true
+defaults,allow_other,use_ino,cache.files=off,dropcacheonclose=true,category.create=epmfs,minfreespace=50G,moveonenospc=true,noatime
 ```
 
 **What each option does (keep this for future reference):**
@@ -400,6 +398,7 @@ defaults,allow_other,use_ino,cache.files=off,dropcacheonclose=true,category.crea
 - `category.create=epmfs` — **write policy: Existing Path, Most Free Space.** If the destination folder already exists on a specific drive, new files go there (keeps related files together). For brand new folders, picks the drive with the most free space. As drives fill over the years, the "most free" winner rotates naturally, giving you even distribution without any manual intervention. *Search: mergerfs epmfs create policy*
 - `minfreespace=50G` — never write to a drive with less than 50GB free. Prevents a drive from being completely filled, which causes filesystem errors. Adjust upward if you use very large files. *Search: mergerfs minfreespace*
 - `moveonenospc=true` — if a write fails because a drive unexpectedly hits its limit, automatically retry on another drive in the pool instead of returning an error to the application. *Search: mergerfs moveonenospc*
+- `noatime` — **do not update the access timestamp when a file is read.** Without this, every file read triggers a metadata write to update the "last accessed" time on the HDD, which wakes sleeping drives unnecessarily and causes extra wear. `noatime` is standard practice for NAS storage. *Search: noatime fstab linux*
 
 Click **Save** → **Apply**. Verify:
 ```bash
@@ -419,6 +418,16 @@ Pool 2 stacks on top of Pool 1 (a FUSE mount), which the OMV GUI may not support
 blkid /dev/nvme0n1p3
 # Look for: UUID="XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
 ```
+
+**Step 1b — Verify the actual Pool 1 systemd unit name:**
+
+The Pool 2 unit must declare Pool 1 as a dependency. But OMV's MergerFS plugin generates the Pool 1 unit name internally — verify it before hardcoding it:
+
+```bash
+systemctl list-units | grep mergerfs
+```
+
+You should see a unit like `srv-mergerfs-data.mount`. Note the exact name — use it in the `After=` and `Requires=` lines below. If the name differs from `srv-mergerfs-data.mount`, substitute accordingly.
 
 **Step 2 — Create the systemd mount unit:**
 ```bash
@@ -441,6 +450,8 @@ Options=defaults,allow_other,use_ino,cache.files=off,dropcacheonclose=true,categ
 [Install]
 WantedBy=multi-user.target
 ```
+
+> **Performance note — double FUSE overhead:** Pool 2 is a FUSE filesystem stacked on top of Pool 1, which is also a FUSE filesystem. Every read goes through two FUSE layers. For sequential reads of large files (copying a 10 GB file over SMB) this overhead is negligible. For workloads involving many small files or frequent random access — such as Immich generating thumbnails or running face recognition — this can be a meaningful performance hit. If you notice sluggishness with Immich specifically, that's the likely cause; the tradeoff is accepted in exchange for correct NVMe-first write routing and even HDD distribution. *Search: mergerfs fuse overhead stacking*
 
 > **Filename must exactly match the mount path** with slashes replaced by dashes: mount path `/srv/mergerfs/pool` → filename `srv-mergerfs-pool.mount`. This is a systemd requirement. *Search: systemd mount unit naming*
 
@@ -490,20 +501,26 @@ lsblk -f
 
 Command (substitute your NVMe UUID path):
 ```bash
-find /srv/dev-disk-by-uuid-<nvme-cache>/ -mindepth 1 \
-  ! -name 'snapraid*' \
-  | while IFS= read -r src; do
-      rel="${src#/srv/dev-disk-by-uuid-<nvme-cache>/}"
-      dst="/srv/mergerfs/data/$rel"
-      mkdir -p "$(dirname "$dst")"
-      mv "$src" "$dst"
-    done
-find /srv/dev-disk-by-uuid-<nvme-cache>/ -mindepth 1 -empty -type d -delete
+#!/bin/bash
+set -euo pipefail
+
+NVME="/srv/dev-disk-by-uuid-<nvme-cache>"
+POOL1="/srv/mergerfs/data"
+
+# Move all files from NVMe to Pool 1, excluding SnapRAID content files.
+# rsync --remove-source-files is used instead of mv: it copies first, then
+# deletes the source only on success. This makes the operation resumable and
+# safe across a power loss — a partial file on the destination will not cause
+# data loss, and the original on the NVMe remains intact until the copy succeeds.
+rsync -a --remove-source-files \
+  --exclude='snapraid*' \
+  "$NVME/" "$POOL1/"
+
+# Clean up any empty directories left behind on the NVMe
+find "$NVME/" -mindepth 1 -empty -type d -delete
 ```
 
-> The destination is `/srv/mergerfs/data` — Pool 1 — not a specific drive UUID. `epmfs` then decides which physical HDD the file lands on based on free space. This is what gives you even distribution across all HDDs as you expand.
->
-> `! -name 'snapraid*'` prevents the SnapRAID content file on the NVMe from being moved.
+> `set -euo pipefail` causes the script to abort immediately on any error rather than continuing silently. If rsync fails mid-transfer (e.g. power loss, full disk), the next run will resume from where it left off — rsync skips files that already exist at the destination. *Search: rsync remove-source-files resumable*
 
 **How the full nightly sequence works:**
 1. **3:00 AM** — Mover empties NVMe into Pool 1. `epmfs` spreads files across HDDs.
@@ -535,16 +552,16 @@ For each, select the **MergerFS pool** filesystem and set appropriate permission
 
 ## Phase 12 — Configure SMB (Windows File Sharing)
 
-### 11.1 Enable SMB Service
+### 12.1 Enable SMB Service
 
 `Services` → `SMB/CIFS` → `Settings` → Enable → set Workgroup to match your network (default `WORKGROUP` is fine) → Save → Apply.
 
-### 11.2 Create a NAS User
+### 12.2 Create a NAS User
 
 `Users` → `Users` → **+**  
 Create a user (e.g., your own username). This is the account you'll use to connect from Windows/Mac.
 
-### 11.3 Add SMB Shares
+### 12.3 Add SMB Shares
 
 `Services` → `SMB/CIFS` → `Shares` → **+**
 
@@ -561,12 +578,12 @@ For each shared folder you want to expose, create a share:
 
 Repeat for each share. Save → Apply.
 
-### 11.4 Set Folder Permissions
+### 12.4 Set Folder Permissions
 
 `Storage` → `Shared Folders` → select a folder → `Permissions`  
 Grant your user **Read/Write** access to each folder.
 
-### 11.5 Connect from Windows
+### 12.5 Connect from Windows
 
 Open File Explorer → address bar → type:
 ```
@@ -578,11 +595,11 @@ Enter your NAS username and password when prompted.
 
 ## Phase 13 — Configure NFS (Linux / VM Sharing)
 
-### 12.1 Enable NFS Service
+### 13.1 Enable NFS Service
 
 `Services` → `NFS` → `Settings` → Enable → Save → Apply.
 
-### 12.2 Add NFS Shares
+### 13.2 Add NFS Shares
 
 `Services` → `NFS` → `Shares` → **+**
 
@@ -596,7 +613,7 @@ Enter your NAS username and password when prompted.
 
 Save → Apply.
 
-### 12.3 Mount from a Linux Client
+### 13.3 Mount from a Linux Client
 
 ```bash
 sudo mount -t nfs <nas-ip>:/export/<share-name> /mnt/nas-share
@@ -613,7 +630,7 @@ To make it permanent, add to `/etc/fstab`:
 
 SSH is already enabled from Phase 4. A few hardening steps are recommended:
 
-### 13.1 Create a Non-Root User for SSH (Optional but Recommended)
+### 14.1 Create a Non-Root User for SSH (Optional but Recommended)
 
 If you created a user in Phase 12, you can already SSH as that user. To also allow root SSH (convenient for admin tasks, less secure):
 
@@ -623,7 +640,7 @@ If you created a user in Phase 12, you can already SSH as that user. To also all
 grep PermitRootLogin /etc/ssh/sshd_config
 ```
 
-### 13.2 (Optional) Key-Based Authentication
+### 14.2 (Optional) Key-Based Authentication
 
 On your client PC, generate a key pair if you don't have one:
 ```bash
@@ -698,6 +715,11 @@ for DRIVE in "${DRIVES[@]}"; do
 done
 
 echo "All drives confirmed mounted. Proceeding with SnapRAID diff script."
+
+# Verify the diff script path before relying on this script:
+# which omv-snapraid-diff
+# OMV plugin updates have occasionally changed this path. If the command
+# below fails, run 'which omv-snapraid-diff' and update the path here.
 /usr/sbin/omv-snapraid-diff
 ```
 
@@ -746,7 +768,7 @@ The OMV SnapRAID plugin includes a built-in diff script already installed alongs
 
 | Setting | Value | Why |
 |---------|-------|-----|
-| **Delete threshold** | `20` | Abort sync if more than 20 files appear deleted. A dead drive shows thousands of deletions — this is the second safety net after the mount check. Adjust upward only if you regularly delete large batches intentionally. |
+| **Delete threshold** | `500` | Abort sync if more than 500 files appear deleted. On a media NAS, batch deletes of a TV season, duplicates, or reorganised folders can easily be 50–300 files — a threshold of 20 would produce constant false alarms for normal usage. 500 is high enough to survive routine large deletes but low enough that a dead drive (showing thousands or millions of deletions) still aborts cleanly. Tune this up or down based on your own deletion patterns. |
 | **Update threshold** | `40` | Abort if more than 40 files appear modified unexpectedly. Protects against mass corruption being synced into parity. |
 | **Run scrub** | Yes | Runs scrub automatically after a successful sync. |
 | **Scrub percentage** | `22` | Checks 22% of the array per run — full verification over ~4 Sundays. |
@@ -765,7 +787,7 @@ Save. Do **not** click "Schedule Diff" — the mount guard script already calls 
    - All drives present → hand off to diff script
 3. **3:30 AM** (continued) — Diff script runs:
    - Counts added/deleted/modified files since last sync
-   - Deletions > 20 or updates > 40 → **abort, send warning, do not sync**
+   - Deletions > 500 or updates > 40 → **abort, send warning, do not sync**
    - Within thresholds → run sync, then scrub 22% of the array
 4. **Morning** — Clean "sync completed" email, or a warning that needs your attention
 
@@ -793,7 +815,7 @@ nano /etc/snapraid-aio-script.conf
 
 Key settings:
 ```bash
-DEL_THRESHOLD=20
+DEL_THRESHOLD=500
 UP_THRESHOLD=40
 SCRUB_PERCENT=22
 SCRUB_DELAYED_RUN=7
@@ -806,21 +828,22 @@ Then update the mount guard script — replace `/usr/sbin/omv-snapraid-diff` wit
 
 ### 15.4 (Optional) Btrfs Scheduled Scrub
 
-Btrfs has its own independent scrub that verifies filesystem-level checksums, separate from SnapRAID:
+Btrfs has its own independent scrub that verifies filesystem-level checksums, separate from SnapRAID. Only the data drive and NVMe are Btrfs — the parity drive is now ext4 and does not need a Btrfs scrub.
 
 `System` → `Scheduled Tasks` → **+**
 
 | Setting | Value |
 |---------|-------|
 | Enable | Yes |
-| Time | `0 5 1 * *` (5:00 AM on the 1st of each month) |
+| Time | `0 12 1 * *` (12:00 noon on the 1st of each month) |
 | Command | See below |
 
 ```bash
 btrfs scrub start /srv/dev-disk-by-uuid-<data-drive-uuid>
-btrfs scrub start /srv/dev-disk-by-uuid-<parity-drive-uuid>
 btrfs scrub start /srv/dev-disk-by-uuid-<nvme-cache-uuid>
 ```
+
+> Scheduled at noon rather than early morning to avoid I/O contention with the nightly SnapRAID sync which runs at 3:30 AM. On the 1st of the month, running both within 90 minutes of each other on an 18 TB drive would cause significant contention.
 
 ---
 
@@ -894,7 +917,7 @@ HD_IDLE_OPTS="-i 0 \
 
 - `START_HD_IDLE=true` — enables the daemon at boot
 - `-i 0` at the start — disables spindown for all drives **not** explicitly listed below. This is critical: it prevents hd-idle from accidentally spinning down the NVMe or any other drive you didn't intend. *Search: hd-idle -i 0 default*
-- `-a /dev/disk/by-label/data1 -i 1800` — spin down the data drive after 1800 seconds (30 minutes) of inactivity. Uses the Btrfs label, not `/dev/sda` — labels are stable across reboots; device names are not. *Search: hd-idle by-label*
+- `-a /dev/disk/by-label/data1 -i 1800` — spin down the data drive after 1800 seconds (30 minutes) of inactivity. Uses the disk label rather than `/dev/sda` — labels are stable across reboots; device names are not. *Search: hd-idle by-label*
 - `-a /dev/disk/by-label/parity1 -i 1800` — same for the parity drive. The parity drive is particularly idle — it only wakes for the nightly sync — so 30 minutes is generous
 - `-l /var/log/hd-idle.log` — write spindown/wakeup events to a log file so you can verify it's working
 
@@ -1066,7 +1089,13 @@ SnapRAID uses sub-second file timestamps to tell the difference between a moved 
 
 `snapraid touch` stamps those files before sync runs, fixing this silently.
 
-**If you're using the AIO script (Phase 15.3):** it runs `touch` automatically — nothing to do.
+**If you're using the AIO script (Phase 15.3):** check that `TOUCH=1` is set in your `/etc/snapraid-aio-script.conf` — it is not always the default depending on the version you downloaded. Open the config and confirm:
+```bash
+grep TOUCH /etc/snapraid-aio-script.conf
+# Should show: TOUCH=1
+# If it shows TOUCH=0, change it to TOUCH=1 and save
+```
+If TOUCH=1 is set, touch runs automatically and you don't need the scheduled task below.
 
 **If you're using the OMV diff script (Phase 15.2):** add `snapraid touch` as a scheduled task that runs just before the mount guard:
 
@@ -1148,7 +1177,7 @@ Immich runs on your **home server** via Docker. Its library — all photos and v
                                  [NAS: /srv/mergerfs/pool/photos]
 ```
 
-### 16.1 Prepare the NAS Side
+### 19.1 Prepare the NAS Side
 
 The `photos` SMB share from Phase 12 is all you need. No NFS setup required for Immich.
 
@@ -1156,7 +1185,7 @@ The one thing worth double-checking: the NAS user you created has **read/write a
 
 `Storage` → `Shared Folders` → `photos` → `Permissions` → confirm your NAS user has Read/Write.
 
-### 16.2 Mount the NAS Share on the Home Server
+### 19.2 Mount the NAS Share on the Home Server
 
 Immich will access the NAS via an SMB share mounted through `/etc/fstab`. The key extra option is `nobrl` — this disables byte-range locking, which otherwise causes conflicts between Docker and CIFS mounts.
 
@@ -1205,7 +1234,7 @@ sudo systemctl daemon-reload
 sudo mount -a
 ```
 
-### 16.3 Install Immich on the Home Server
+### 19.3 Install Immich on the Home Server
 
 Immich uses Docker Compose. On your home server:
 
@@ -1218,7 +1247,7 @@ wget -O compose.yaml https://github.com/immich-app/immich/releases/latest/downlo
 wget -O .env https://github.com/immich-app/immich/releases/latest/download/example.env
 ```
 
-### 16.4 Configure Immich to Use NAS Storage
+### 19.4 Configure Immich to Use NAS Storage
 
 Edit the `.env` file:
 ```bash
@@ -1240,7 +1269,7 @@ TZ=Europe/Berlin
 
 > **Important**: Keep `DB_DATA_LOCATION` on local storage (the home server's own disk). The Immich database (PostgreSQL) does not perform well over NFS. Only the photo library (`UPLOAD_LOCATION`) goes to the NAS.
 
-### 16.5 Start Immich
+### 19.5 Start Immich
 
 ```bash
 docker compose up -d
@@ -1253,7 +1282,7 @@ http://<home-server-ip>:2283
 
 First launch creates the admin account — follow the setup wizard.
 
-### 16.6 Point Immich at Existing Photos (External Library)
+### 19.6 Point Immich at Existing Photos (External Library)
 
 If you already have photos on the NAS that you want Immich to index without moving them, use Immich's **External Library** feature:
 
@@ -1264,7 +1293,7 @@ In Immich web UI:
 
 This way, photos you manage manually (e.g., organized folders from a camera) stay in place and are still visible in Immich.
 
-### 16.7 Keep Immich Updated
+### 19.7 Keep Immich Updated
 
 Immich releases frequently. Update with:
 ```bash
@@ -1275,7 +1304,7 @@ docker compose up -d
 
 > **Tip**: Immich is under active development — check the release notes before updating, as breaking changes occasionally occur between versions.
 
-### 16.8 Backup the Immich Database
+### 19.8 Backup the Immich Database
 
 The photos themselves are on the NAS (and protected by SnapRAID), but the Immich database (albums, faces, metadata) lives on the home server. Back it up separately:
 
@@ -1284,7 +1313,16 @@ The photos themselves are on the NAS (and protected by SnapRAID), but the Immich
 0 1 * * * docker exec immich_postgres pg_dumpall -U postgres > /mnt/nas/backups/immich-db-$(date +\%F).sql
 ```
 
-This dumps the database directly to the NAS `backups` share, so it's also protected by SnapRAID.
+This dumps the database to the NAS `backups` share, so it's also protected by SnapRAID.
+
+> **Circular dependency warning:** if the NAS is unreachable when this runs (network issue, NVMe failure, HDD failure), the backup silently fails — writing to a dead mount just errors out. Add a local fallback so you always have at least one copy regardless of NAS availability:
+> ```bash
+> 0 1 * * * docker exec immich_postgres pg_dumpall -U postgres \
+>   > ~/immich-db-backup/immich-db-$(date +\%F).sql && \
+>   cp ~/immich-db-backup/immich-db-$(date +\%F).sql \
+>   /mnt/nas/backups/immich-db-$(date +\%F).sql
+> ```
+> This writes locally first, then copies to the NAS. If the NAS copy fails, the local copy remains. Keep only the last 7 days locally to avoid filling the home server disk (`find ~/immich-db-backup -mtime +7 -delete`).
 
 ---
 
@@ -1448,9 +1486,9 @@ Three different drives can fail, and each is handled differently. Read the relev
 
 1. **Verify your data is intact** — mount Pool 1 and check your files are accessible. They should be completely unaffected.
 
-2. **Replace the parity drive** with a new drive of the same size or larger. Format with Btrfs:
+2. **Replace the parity drive** with a new drive of the same size or larger. Format with ext4:
    ```bash
-   mkfs.btrfs /dev/sdX -L "parity1"
+   mkfs.ext4 -L "parity1" /dev/sdX
    ```
 
 3. **Mount the new drive in OMV** (`Storage` → `File Systems`).
@@ -1474,22 +1512,45 @@ Three different drives can fail, and each is handled differently. Read the relev
 | HDD data drive (Bay 1/3/4) | Files on that drive | Yes — run `fix` before `sync` | High — replace and recover ASAP |
 | HDD parity drive (Bay 2) | None | No — just replace and resync | Medium — you're unprotected until done |
 
-When you add drives to Bays 3 and 4, you only ever touch **Pool 1**. Pool 2 never changes — it still points to the NVMe and `/srv/mergerfs/data`, and Pool 1 now just happens to contain more drives behind that mount point.
+---
 
-1. **Format the new drive with Btrfs** (same as Phase 8)
-2. **Mount it in OMV** (`Storage` → `File Systems`)
-3. **Add it to Pool 1 only** (`Storage` → `MergerFS` → edit the `data` pool → add the new drive)  
-   Do not touch Pool 2 (`pool`) — it automatically benefits because Pool 1 now has more drives
-4. **Add it to SnapRAID as a data drive** (`Storage` → `SnapRAID` → add drive)
-5. **Update the mount guard script** — add the new drive's UUID path to the `DRIVES` array in `/usr/local/bin/snapraid-safe-sync.sh`. If you skip this, the mount check won't protect the new drive.
-6. **Run a manual sync** to compute parity for the new drive — this is safe to run directly since you are intentionally adding a known-good drive in a controlled situation:
+## Adding Drives Later (Future Expansion)
+
+When you add drives to Bays 3 and 4, you only ever touch **Pool 1**. Pool 2 never changes — it still points to the NVMe and `/srv/mergerfs/data`, and Pool 1 now just has more drives behind that mount point. From the outside, nothing changes — the same share paths, the same pool mount, the same nightly routine.
+
+**Steps:**
+
+1. **Check the SMART status of the new drive** before trusting it with data — same as Phase 6.
+
+2. **Format the new drive with Btrfs** (same as Phase 8):
+   ```bash
+   mkfs.btrfs /dev/sdX -L "data2"   # or data3 for the third drive
+   ```
+
+3. **Mount it in OMV** (`Storage` → `File Systems`)
+
+4. **Add it to Pool 1 only** (`Storage` → `MergerFS` → edit the `data` pool → add the new drive)
+   Do not touch Pool 2 (`pool`) — it automatically benefits because Pool 1 now has more drives behind it.
+
+5. **Add it to SnapRAID as a data drive** (`Storage` → `SnapRAID` → add drive)
+
+6. **Update the mount guard script** — add the new drive's UUID path to the `DRIVES` array in `/usr/local/bin/snapraid-safe-sync.sh`. If you skip this, the mount check won't protect the new drive from triggering a blind sync.
+
+7. **Run a manual sync** to compute parity for the new drive:
    ```bash
    snapraid sync
    ```
+   This is safe to run directly — you're adding a known-good drive intentionally, in a controlled situation.
 
-From this point on, `epmfs` in Pool 1 will naturally start routing new files and incoming cache flushes to whichever HDD has the most free space — including the new one. No manual rebalancing needed.
+8. **Update the hd-idle config** to include the new drive:
+   Add `-a /dev/disk/by-label/data2 -i 1800 \` to `/etc/default/hd-idle` and restart the service:
+   ```bash
+   systemctl restart hd-idle
+   ```
 
-The existing Bay 2 parity drive (18 TB) can protect up to 3 data drives (Bays 1, 3, and 4), all 18 TB or smaller.
+From this point, `epmfs` in Pool 1 will naturally route new writes and cache flushes to whichever HDD has the most free space — including the new one. No manual rebalancing needed.
+
+**Parity capacity:** the existing Bay 2 parity drive (18 TB) can protect up to 3 data drives (Bays 1, 3, and 4), all 18 TB or smaller. If you add a fourth data drive larger than 18 TB, you would need to upgrade the parity drive to match. *Search: snapraid parity drive size requirement*
 
 ---
 
