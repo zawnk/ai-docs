@@ -47,7 +47,7 @@
 
 1. Connect monitor and keyboard to the DXP4800.
 2. Insert your USB drive.
-3. Power on and **press `Del`** (or `F2`) repeatedly to enter BIOS.
+3. Power on and **press `CTRL + F2`** repeatedly to enter BIOS.
 4. In BIOS:
    - Set **Boot Mode** to **UEFI** (not Legacy/CSM)
    - Set **Boot Order**: USB drive first, NVMe second
@@ -68,7 +68,9 @@ The installer is a standard Debian installer. Follow these steps carefully — t
 4. Leave domain name blank or enter your local domain if you have one.
 5. Set a strong **root password** and note it down.
 
-### 3.2 Manual Disk Partitioning (Critical Step)
+### 3.2 Manual Disk Partitioning (Critical Step) (<-- does not working during setup)
+
+❗ this did not work as described here, the setup won't let you partition while installing. you need to boot into gparted afterwards, shrink the ext4 to whatever size you desire and then create a new btrfs partition with the unallocated space, label "cache", then continue with Phase 4
 
 When you reach **"Partition disks"**:
 
@@ -122,7 +124,7 @@ ssh root@<ip>
 - Password: `openmediavault`
 
 **Immediately change the admin password:**  
-`System` → `General Settings` → `Web Administrator Password`
+`User Settings` → `Change Password`
 
 ### 4.3 Set a Static IP
 
@@ -163,7 +165,7 @@ apt update && apt full-upgrade -y
 
 ### 5.1 Install omv-extras
 
-SSH into your NAS as root and run:
+SSH into your NAS as root and run (verify on https://github.com/OpenMediaVault-Plugin-Developers/packages):
 ```bash
 wget -O - https://github.com/OpenMediaVault-Plugin-Developers/packages/raw/master/install | bash
 ```
@@ -189,7 +191,7 @@ Before putting any data on the drives, verify they are healthy and genuinely new
 
 ### 6.1 Enable S.M.A.R.T. Monitoring in OMV
 
-`Storage` → `S.M.A.R.T.` → `Settings` → Enable → Save → Apply.
+`Storage` → `S.M.A.R.T.` → `Settings` → Enable → Set **Check Interval** to 3600 and **Power mode** to Standby → Save → Apply.
 
 ### 6.2 Run a Short Self-Test on Each Drive
 
@@ -197,7 +199,8 @@ Before putting any data on the drives, verify they are healthy and genuinely new
 
 You should see both Toshiba drives listed. For each drive:
 1. Select the drive
-2. Click **Perform scheduled test** → choose **Short** → run it
+2. Click **Edit** → check **Monitoring enabled** → run it
+3. Click **Scheduled Tasks** → **Create** → Choose the drive, Hour: 1, Day of week: Sunday → **Save**
 
 A short test takes 1–2 minutes per drive. Refresh the page and check the **Self-test logs** tab — the result should show `Completed without error`.
 
@@ -213,7 +216,7 @@ For each drive, click on it and go to the **Attributes** tab. The critical value
 | Offline Uncorrectable | 198 | Must be **0** |
 | Power-On Hours | 9 | Should be very low (under ~50h) for a new drive — a high value means the drive isn't new |
 
-### 6.4 Cross-Check via CLI
+### 6.4 Cross-Check via CLI (not needed because you can see the smartctl log already)
 
 For a full raw dump from the command line:
 
@@ -262,7 +265,7 @@ mkfs.btrfs /dev/nvme0n1p3 -L "cache"
 ### 7.3 Mount in OMV
 
 Now tell OMV about this filesystem:  
-`Storage` → `File Systems` → Click the **+** (Mount) button
+`Storage` → `File Systems` → Click the **►** (Mount an existing file system) button
 
 OMV will scan and list unmounted filesystems. Find the Btrfs partition on your NVMe (~940 GB, labeled "cache") → select it → **Save** → **Apply**.
 
@@ -300,19 +303,19 @@ mkfs.ext4 -L "parity1" /dev/sdb
 
 ### 8.3 Mount Both Drives in OMV
 
-`Storage` → `File Systems` → click **+** (Mount)
+`Storage` → `File Systems` → click **►** (Mount)
 
 Mount **both** drives, one at a time. OMV will assign each a `/srv/dev-disk-by-uuid-...` path. Note both paths — you'll need them for SnapRAID.
 
 ---
 
-## Phase 9 — Configure SnapRAID
+## Phase 9 — Configure SnapRAID (seems outdated for the first 4 substeps. requires array and then add the drives)
 
 SnapRAID protects against drive failure and detects bitrot. It is **not** real-time RAID — it takes periodic snapshots. This means you must sync regularly (covered in Phase 15).
 
 ### 9.1 Open SnapRAID Configuration
 
-`Storage` → `SnapRAID`
+`Services` → `SnapRAID`
 
 ### 9.2 Configure Parity Drive
 
@@ -352,7 +355,7 @@ This first sync will take a long time on 18 TB drives (could be several hours). 
 
 ---
 
-## Phase 10 — Configure MergerFS (Two-Pool Setup)
+## Phase 10 — Configure MergerFS (Two-Pool Setup) (this can all be done in the omv gui)
 
 Two separate MergerFS pools are used. This solves two problems at once: the NVMe always receives writes first, and when data is flushed to the HDDs it is distributed evenly across all of them rather than piling onto one.
 
