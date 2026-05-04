@@ -829,7 +829,7 @@ Then update the mount guard script — replace `/usr/sbin/omv-snapraid-diff` wit
 
 > **Note:** The AIO script requires at least one prior sync to have completed — the initial sync from Phase 8 satisfies this.
 
-### 15.4 (Optional) Btrfs Scheduled Scrub
+### 15.4 (Optional) Btrfs Scheduled Scrub (not needed, omv has its own that runs monthly + sends an email)
 
 Btrfs has its own independent scrub that verifies filesystem-level checksums, separate from SnapRAID. Only the data drive and NVMe are Btrfs — the parity drive is now ext4 and does not need a Btrfs scrub.
 
